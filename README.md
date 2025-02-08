@@ -17,9 +17,13 @@ Save your changes
 ### Method 2: Network Volume
 If using a network volume, create a startup script:
 Navigate to the /workspace directory
-Create additional_params.sh:
-Add export civitai_token="your_token_here" to the file
+
+Create additional_params.sh ```touch additional_params.sh```
+
+Add ```export civitai_token="your_token_here"``` to the file
+
 Save the file
+
 The variable will be set automatically on pod startup.
 
 ## Usage
