@@ -3,8 +3,8 @@
 Before using the downloader, you'll need to generate an API token. Instructions for this can be found in the RunPod template's README file.
 
 ## Using your token
-Once you generated your token
-Configure your API Token
+Once you generated your token you need to configure your API Token.
+
 There are two methods to set up your API token:
 
 ### Method 1: RunPod Interface
