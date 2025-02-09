@@ -4,16 +4,15 @@ import argparse
 import os
 import sys
 
-# Parse arguments
+
 parser = argparse.ArgumentParser()
-parser.add_argument("-m", "--model", type=str, required=True, help="CivitAI model ID to download")
+parser.add_argument("-m", "--model", type=str, required=True, help="CivitAI model version ID to download")
 parser.add_argument("-t", "--token", type=str, help="CivitAI API token (if not set in environment)")
 args = parser.parse_args()
 
+token = args.token if args.token else os.getenv("civitai_token")
 
-# Determine the token
-token = os.getenv("civitai_token", args.token)
-if not token:
+if not token or token == "token_here":
     print("Error: no token provided. Set the 'civitai_token' environment variable or use --token.")
     sys.exit(1)
 
