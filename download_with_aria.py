@@ -115,7 +115,7 @@ def main():
 
         # Download the file
         success = download_with_aria(
-            model_info['download_url'],
+            f"https://civitai.com/api/v1/model-versions/{args.model_id}",
             args.output,
             filename,
             args.token
