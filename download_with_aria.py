@@ -14,40 +14,13 @@ def get_model_info(model_id, token):
 
     try:
         # Get model info
-        response = requests.get(f"https://civitai.com/api/v1/model-versions/{model_id}", headers=headers)
+        response = requests.get(f"https://civitai.com/api/v1/model-versions/{model_id}")
         response.raise_for_status()
-        model_data = response.json()
-
-        # Get the latest version (first in the list)
-        if not model_data.get('modelVersions'):
-            raise Exception(f"No versions found for model {model_id}")
-
-        latest_version = model_data['modelVersions'][0]
-
-        # Get download files
-        files = latest_version.get('files', [])
-        if not files:
-            raise Exception(f"No files found for model {model_id}")
-
-        # Find the primary model file (usually the largest or marked as primary)
-        primary_file = None
-        for file in files:
-            if file.get('primary', False) or file['type'] == 'Model':
-                primary_file = file
-                break
-
-        if not primary_file:
-            primary_file = files[0]  # Fallback to first file
-
-        return {
-            'model_name': model_data['name'],
-            'version_name': latest_version['name'],
-            'filename': primary_file['name'],
-            'download_url': primary_file['downloadUrl'],
-            'size': primary_file.get('sizeKB', 0) * 1024,
-            'model_version_id': latest_version['id']  # Add this for the download URL
-        }
-
+        if response.status_code == 200:
+            data = response.json()
+            filename = data['files'][0]['name']
+            return filename
+        return None
     except requests.RequestException as e:
         raise Exception(f"Failed to fetch model info: {e}")
 
@@ -101,23 +74,12 @@ def main():
     args = parser.parse_args()
 
     try:
+        filename = get_model_info(args.model_id, args.token)
         # Create output directory
         os.makedirs(args.output, exist_ok=True)
 
-        # Get model information
-        print(f"Fetching info for model ID: {args.model_id}")
-        model_info = get_model_info(args.model_id, args.token)
-
-        print(f"Model: {model_info['model_name']}")
-        print(f"Version: {model_info['version_name']}")
-        print(f"Filename: {model_info['filename']}")
-        print(f"Size: {model_info['size'] / (1024 * 1024 * 1024):.2f} GB")
-
-        # Use custom filename if provided, otherwise use original
-        filename = args.filename if args.filename else model_info['filename']
-
         # Construct the correct download URL
-        download_url = f"https://civitai.com/api/download/models/{model_info['model_version_id']}?type=Model&format=SafeTensor"
+        download_url = f"https://civitai.com/api/download/models/{args.model_id}?type=Model&format=SafeTensor"
         if args.token:
             download_url += f"&token={args.token}"
 
