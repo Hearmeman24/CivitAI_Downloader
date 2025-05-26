@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import requests
 import os
@@ -13,7 +14,7 @@ def get_model_info(model_id, token):
 
     try:
         # Get model info
-        response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", headers=headers)
+        response = requests.get(f"https://civitai.com/api/v1/model-versions/{model_id}", headers=headers)
         response.raise_for_status()
         model_data = response.json()
 
@@ -43,7 +44,8 @@ def get_model_info(model_id, token):
             'version_name': latest_version['name'],
             'filename': primary_file['name'],
             'download_url': primary_file['downloadUrl'],
-            'size': primary_file.get('sizeKB', 0) * 1024
+            'size': primary_file.get('sizeKB', 0) * 1024,
+            'model_version_id': latest_version['id']  # Add this for the download URL
         }
 
     except requests.RequestException as e:
@@ -64,7 +66,8 @@ def download_with_aria(url, output_path, filename, token=None):
         '--max-concurrent-downloads=1',
         '--dir=' + output_path,
         '--out=' + filename,  # This ensures proper filename
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        '--content-disposition'  # Add content-disposition support
     ]
 
     # Add authorization header if token provided
@@ -113,9 +116,14 @@ def main():
         # Use custom filename if provided, otherwise use original
         filename = args.filename if args.filename else model_info['filename']
 
+        # Construct the correct download URL
+        download_url = f"https://civitai.com/api/download/models/{model_info['model_version_id']}?type=Model&format=SafeTensor"
+        if args.token:
+            download_url += f"&token={args.token}"
+
         # Download the file
         success = download_with_aria(
-            f"https://civitai.com/api/v1/model-versions/{args.model_id}",
+            download_url,
             args.output,
             filename,
             args.token
