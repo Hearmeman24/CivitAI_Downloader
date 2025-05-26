@@ -25,30 +25,16 @@ def get_model_info(model_id, token):
         raise Exception(f"Failed to fetch model info: {e}")
 
 
-def download_with_aria(url, output_path, filename, token=None):
+def download_with_aria(model_id, output_path, filename, token=None):
     """Download file using aria2c with proper filename"""
 
     # Prepare aria2c command
-    cmd = [
-        'aria2c',
-        '--file-allocation=none',
-        '--continue=true',
-        '--max-connection-per-server=8',
-        '--split=8',
-        '--min-split-size=1M',
-        '--max-concurrent-downloads=1',
-        '--dir=' + output_path,
-        '--out=' + filename,  # This ensures proper filename
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        '--content-disposition'  # Add content-disposition support
-    ]
-
-    # Add authorization header if token provided
-    if token:
-        cmd.extend(['--header', f'Authorization: Bearer {token}'])
-
-    # Add URL
-    cmd.append(url)
+    cmd = (
+        f'aria2c -x 8 -s 8 --file-allocation=none --continue=true --summary-interval=10 '
+        f'--dir="{output_path}" '
+        f'--out="{filename}" '
+        f'"https://civitai.com/api/download/models/{model_id}?type=Model&format=SafeTensor&token={token}"'
+    )
 
     print(f"Downloading {filename} to {output_path}")
     print(f"Command: {' '.join(cmd)}")
@@ -85,7 +71,7 @@ def main():
 
         # Download the file
         success = download_with_aria(
-            download_url,
+            args.model_id,
             args.output,
             filename,
             args.token
