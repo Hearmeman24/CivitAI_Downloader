@@ -17,9 +17,9 @@ def check_and_install_aria2():
 
     try:
         print("Updating package list...")
-        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['apt-get', 'update'], check=True)
         print("Installing aria2...")
-        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'aria2'], check=True)
+        subprocess.run(['apt-get', 'install', '-y', 'aria2'], check=True)
 
         # Verify installation
         if shutil.which('aria2c'):
