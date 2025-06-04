@@ -31,7 +31,7 @@ def check_and_install_aria2():
 
     except subprocess.CalledProcessError as e:
         print(f"❌ Failed to install aria2: {e}")
-        print("Please install aria2 manually: sudo apt-get install aria2")
+        print("Please install aria2 manually: apt-get install aria2")
         return False
     except Exception as e:
         print(f"❌ Error during aria2 installation: {e}")
