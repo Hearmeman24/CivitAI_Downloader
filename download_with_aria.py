@@ -7,37 +7,6 @@ import sys
 import shutil
 
 
-def check_and_install_aria2():
-    """Check if aria2c is installed, install if not available"""
-    if shutil.which('aria2c'):
-        print("✅ aria2c is already installed")
-        return True
-
-    print("❌ aria2c not found. Installing using apt-get...")
-
-    try:
-        print("Updating package list...")
-        subprocess.run(['apt-get', 'update'], check=True)
-        print("Installing aria2...")
-        subprocess.run(['apt-get', 'install', '-y', 'aria2'], check=True)
-
-        # Verify installation
-        if shutil.which('aria2c'):
-            print("✅ aria2c installed successfully")
-            return True
-        else:
-            print("❌ aria2c installation failed")
-            return False
-
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to install aria2: {e}")
-        print("Please install aria2 manually: apt-get install aria2")
-        return False
-    except Exception as e:
-        print(f"❌ Error during aria2 installation: {e}")
-        return False
-
-
 def get_model_info(model_id, token):
     """Get model information from CivitAI API"""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -110,11 +79,6 @@ def main():
     args = parser.parse_args()
 
     try:
-        # Check and install aria2 if needed
-        if not check_and_install_aria2():
-            print("❌ aria2c is required but could not be installed. Exiting.")
-            sys.exit(1)
-
         # Get token from environment or arguments
         token = get_civitai_token(args.token)
 
