@@ -30,9 +30,8 @@ def download_with_aria(model_id, output_path, filename, token):
     # Build command as list (more reliable)
     cmd = [
         'aria2c',
-        '-x', '8',
-        '-s', '8',
-        '--file-allocation=none',
+        '-x', '4',
+        '-s', '4',
         '--continue=true',
         '--summary-interval=10',
         f'--dir={output_path}',
