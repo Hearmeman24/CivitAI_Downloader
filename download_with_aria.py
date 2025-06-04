@@ -86,7 +86,7 @@ def download_with_aria(model_id, output_path, filename, token):
 def get_civitai_token(args_token):
     """Get CivitAI token from environment variable or arguments"""
     # Check environment variable first
-    env_token = os.getenv('CIVITAI_TOKEN')
+    env_token = os.getenv('civitai_token')
 
     if env_token:
         print("✅ Using CIVITAI_TOKEN from environment variable")
