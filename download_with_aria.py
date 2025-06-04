@@ -1,11 +1,41 @@
-
 #!/usr/bin/env python3
 import requests
 import os
 import subprocess
 import argparse
-import json
-from urllib.parse import urlparse, parse_qs
+import sys
+import shutil
+
+
+def check_and_install_aria2():
+    """Check if aria2c is installed, install if not available"""
+    if shutil.which('aria2c'):
+        print("✅ aria2c is already installed")
+        return True
+
+    print("❌ aria2c not found. Installing using apt-get...")
+
+    try:
+        print("Updating package list...")
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        print("Installing aria2...")
+        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'aria2'], check=True)
+
+        # Verify installation
+        if shutil.which('aria2c'):
+            print("✅ aria2c installed successfully")
+            return True
+        else:
+            print("❌ aria2c installation failed")
+            return False
+
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to install aria2: {e}")
+        print("Please install aria2 manually: sudo apt-get install aria2")
+        return False
+    except Exception as e:
+        print(f"❌ Error during aria2 installation: {e}")
+        return False
 
 
 def get_model_info(model_id, token):
@@ -14,7 +44,7 @@ def get_model_info(model_id, token):
 
     try:
         # Get model info
-        response = requests.get(f"https://civitai.com/api/v1/model-versions/{model_id}")
+        response = requests.get(f"https://civitai.com/api/v1/model-versions/{model_id}", headers=headers)
         response.raise_for_status()
         if response.status_code == 200:
             data = response.json()
@@ -51,27 +81,53 @@ def download_with_aria(model_id, output_path, filename, token):
     except subprocess.CalledProcessError as e:
         print(f"❌ Download failed: {e}")
         return False
-    except FileNotFoundError as e:
-        print(f"❌ Error: aria2c not found. Please install aria2c first.")
-        return False
+
+
+def get_civitai_token(args_token):
+    """Get CivitAI token from environment variable or arguments"""
+    # Check environment variable first
+    env_token = os.getenv('CIVITAI_TOKEN')
+
+    if env_token:
+        print("✅ Using CIVITAI_TOKEN from environment variable")
+        return env_token
+    elif args_token:
+        print("✅ Using token from command line argument")
+        return args_token
+    else:
+        print("❌ Error: No CivitAI token provided.")
+        print("Either set CIVITAI_TOKEN environment variable or use --token argument")
+        sys.exit(1)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Download models from CivitAI with proper filenames')
     parser.add_argument('-m', '--model-id', required=True, help='CivitAI model ID')
-    parser.add_argument('-o', '--output', required=True, help='Output directory')
-    parser.add_argument('--token', required=True, help='CivitAI API token')
+    parser.add_argument('-o', '--output', default='.', help='Output directory (default: current directory)')
+    parser.add_argument('--token', help='CivitAI API token (optional if CIVITAI_TOKEN env var is set)')
     parser.add_argument('--filename', help='Override filename (optional)')
 
     args = parser.parse_args()
 
     try:
+        # Check and install aria2 if needed
+        if not check_and_install_aria2():
+            print("❌ aria2c is required but could not be installed. Exiting.")
+            sys.exit(1)
+
+        # Get token from environment or arguments
+        token = get_civitai_token(args.token)
+
         # Get filename from API
-        filename = get_model_info(args.model_id, args.token)
+        filename = get_model_info(args.model_id, token)
 
         # Use custom filename if provided
         if args.filename:
             filename = args.filename
+
+        if not filename:
+            print("❌ Could not determine filename for the model")
+            sys.exit(1)
 
         # Create output directory
         os.makedirs(args.output, exist_ok=True)
@@ -81,18 +137,18 @@ def main():
             args.model_id,
             args.output,
             filename,
-            args.token
+            token
         )
 
         if success:
             print(f"✅ Download completed: {os.path.join(args.output, filename)}")
         else:
             print(f"❌ Download failed for model {args.model_id}")
-            exit(1)
+            sys.exit(1)
 
     except Exception as e:
         print(f"❌ Error: {e}")
-        exit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
