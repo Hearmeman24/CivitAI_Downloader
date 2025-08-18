@@ -171,30 +171,9 @@ class CivitAIDownloader:
             print(f"{STATUS['info']} File type: {file_path.suffix}")
             return True, f"File downloaded successfully"
 
-    def download_with_aria2(self, model_id: str, filename: str, force: bool = False) -> bool:
-        """Download file using aria2c with multi-connection support."""
+    def _download_with_url(self, download_url: str, filename: str) -> bool:
+        """Download file using aria2c with the given URL."""
         file_path = self.output_dir / filename
-
-        # Check existing file
-        if not force:
-            is_valid, message = self.validate_file(file_path)
-            if is_valid:
-                print(f"{STATUS['success']} {filename} already exists and is valid")
-                print(f"   {message}")
-                return True
-            elif file_path.exists():
-                print(f"{STATUS['info']} File validation: {message}")
-                self.cleanup_incomplete_download(file_path)
-        else:
-            self.cleanup_incomplete_download(file_path)
-
-        # Build download URL with proper encoding
-        params = {
-            'type': 'Model',
-            'format': 'SafeTensor',
-            'token': self.token
-        }
-        download_url = f"{CIVITAI_API_BASE}/download/models/{model_id}?{urlencode(params)}"
 
         # Aria2 command with optimized settings
         cmd = [
@@ -225,15 +204,6 @@ class CivitAIDownloader:
                 return False
 
             print(f"{STATUS['success']} Download complete: {message}")
-
-            # Process the file
-            success, process_msg = self.process_downloaded_file(file_path)
-            if success:
-                print(f"{STATUS['success']} {process_msg}")
-            else:
-                print(f"{STATUS['error']} Processing failed: {process_msg}")
-                return False
-
             return True
 
         except subprocess.CalledProcessError as e:
@@ -245,6 +215,105 @@ class CivitAIDownloader:
             print("  macOS: brew install aria2")
             print("  Windows: Download from https://aria2.github.io/")
             return False
+
+    def download_with_aria2(self, model_id: str, filename: str, force: bool = False) -> bool:
+        """Download file using aria2c with multi-step fallback strategy."""
+        file_path = self.output_dir / filename
+
+        # Step 1: Check existing file (original logic)
+        if not force:
+            is_valid, message = self.validate_file(file_path)
+            if is_valid:
+                print(f"{STATUS['success']} {filename} already exists and is valid")
+                print(f"   {message}")
+                return True
+            elif file_path.exists():
+                print(f"{STATUS['info']} File validation: {message}")
+                self.cleanup_incomplete_download(file_path)
+        else:
+            self.cleanup_incomplete_download(file_path)
+
+        # Step 2: Check if the original filename is .safetensors - if so, use original API call
+        if filename.lower().endswith(SAFETENSORS_EXT):
+            print(f"{STATUS['info']} Original file is safetensors format, proceeding with standard download")
+
+            # Build original download URL with proper encoding (original API format)
+            params = {
+                'type': 'Model',
+                'format': 'SafeTensor',
+                'token': self.token
+            }
+            download_url = f"{CIVITAI_API_BASE}/download/models/{model_id}?{urlencode(params)}"
+
+            success = self._download_with_url(download_url, filename)
+            if success:
+                success, process_msg = self.process_downloaded_file(file_path)
+                if success:
+                    print(f"{STATUS['success']} {process_msg}")
+                    return True
+                else:
+                    print(f"{STATUS['error']} Processing failed: {process_msg}")
+
+        # Step 3: If original filename is NOT .safetensors, try SafeTensor format download
+        if not filename.lower().endswith(SAFETENSORS_EXT):
+            print(f"{STATUS['info']} Original file is not safetensors format, attempting SafeTensor format download")
+
+            # Generate safetensors filename
+            safetensors_filename = f"{Path(filename).stem}.safetensors"
+            safetensors_path = self.output_dir / safetensors_filename
+
+            # Clean up any existing file
+            self.cleanup_incomplete_download(safetensors_path)
+
+            # Build SafeTensor download URL
+            params = {
+                'type': 'Model',
+                'format': 'SafeTensor',
+                'token': self.token
+            }
+            download_url = f"{CIVITAI_API_BASE}/download/models/{model_id}?{urlencode(params)}"
+
+            success = self._download_with_url(download_url, safetensors_filename)
+            if success:
+                success, process_msg = self.process_downloaded_file(safetensors_path)
+                if success:
+                    print(f"{STATUS['success']} {process_msg}")
+                    return True
+                else:
+                    print(f"{STATUS['error']} Processing failed: {process_msg}")
+            else:
+                print(f"{STATUS['warning']} SafeTensor format download failed")
+
+        # Step 4: Try Diffusers format download as final fallback
+        print(f"{STATUS['info']} Attempting Diffusers format download (ZIP archive)")
+
+        # Generate ZIP filename
+        zip_filename = f"{Path(filename).stem}_diffusers.zip"
+        zip_path = self.output_dir / zip_filename
+
+        # Clean up any existing file
+        self.cleanup_incomplete_download(zip_path)
+
+        # Build Diffusers download URL
+        params = {
+            'type': 'Model',
+            'format': 'Diffusers',
+            'token': self.token
+        }
+        download_url = f"{CIVITAI_API_BASE}/download/models/{model_id}?{urlencode(params)}"
+
+        success = self._download_with_url(download_url, zip_filename)
+        if success:
+            # Process the ZIP file to extract safetensors
+            success, process_msg = self.process_downloaded_file(zip_path)
+            if success:
+                print(f"{STATUS['success']} {process_msg}")
+                return True
+            else:
+                print(f"{STATUS['error']} ZIP processing failed: {process_msg}")
+
+        print(f"{STATUS['error']} All download attempts failed")
+        return False
 
 
 def get_token(args_token: Optional[str]) -> str:
@@ -327,17 +396,12 @@ Examples:
         )
 
         if success:
-            final_path = downloader.output_dir / filename
-            # Check if file was processed (might have different name now)
-            if not final_path.exists():
-                # Look for safetensors files that might have been extracted
-                safetensors_files = list(downloader.output_dir.glob("*.safetensors"))
-                if safetensors_files:
-                    print(f"{STATUS['success']} Model ready at: {safetensors_files[0]}")
-                else:
-                    print(f"{STATUS['success']} Download completed successfully")
+            # Look for safetensors files in the output directory
+            safetensors_files = list(downloader.output_dir.glob("*.safetensors"))
+            if safetensors_files:
+                print(f"{STATUS['success']} Model ready at: {safetensors_files[-1]}")
             else:
-                print(f"{STATUS['success']} Model ready at: {final_path}")
+                print(f"{STATUS['success']} Download completed successfully")
         else:
             sys.exit(1)
 
