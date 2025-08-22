@@ -44,7 +44,7 @@ pip install requests
 ### 3. Download the script
 
 ```bash
-wget https://raw.githubusercontent.com/yourusername/civitai-downloader/main/download_with_aria.py
+wget https://github.com/Hearmeman24/CivitAI_Downloader/blob/main/download_with_aria.py
 chmod +x download_with_aria.py
 ```
 
