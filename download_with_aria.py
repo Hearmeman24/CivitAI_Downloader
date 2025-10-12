@@ -223,7 +223,7 @@ class CivitAIDownloader:
 
     # --- Download core ----------------------------------------------------------
 
-    def _download_with_url(self, download_url: str, prefer_filename: Optional[str]) -> Tuple[bool, Optional[Path]]:
+    def _download_with_url(self, download_url: str, prefer_filename: Optional[str], force: bool = False) -> Tuple[bool, Optional[Path]]:
         """
         Download file using aria2c with the given URL.
         If prefer_filename is None, attempt to fetch it from Content-Disposition header.
@@ -236,7 +236,20 @@ class CivitAIDownloader:
             filename = "download.bin"
 
         file_path = self.output_dir / filename
-        file_path = self._get_unique_filename(file_path)  # avoid accidental overwrite collisions
+        
+        # Check if file already exists and is valid (unless force is True)
+        if not force and file_path.exists():
+            is_valid, message = self.validate_file(file_path)
+            if is_valid:
+                print(f"{STATUS['success']} File already exists and is valid: {file_path.name} ({message})")
+                return True, file_path
+            else:
+                print(f"{STATUS['warning']} Existing file is invalid: {message}. Re-downloading...")
+                self.cleanup_incomplete_download(file_path)
+        
+        # Only use unique filename generation if we're actually going to download and not forcing
+        if not force:
+            file_path = self._get_unique_filename(file_path)  # avoid accidental overwrite collisions
 
         # Show URL without token for debugging
         debug_url = download_url
@@ -320,7 +333,7 @@ class CivitAIDownloader:
             # cleanup any incomplete prior attempt
             self.cleanup_incomplete_download(self.output_dir / target_name)
 
-        ok, path = self._download_with_url(safetensor_url, target_name)
+        ok, path = self._download_with_url(safetensor_url, target_name, force)
         if ok and path:
             ok2, msg, final_path = self.process_downloaded_file(path)
             if ok2:
@@ -349,7 +362,7 @@ class CivitAIDownloader:
         if header_name:
             self.cleanup_incomplete_download(self.output_dir / header_name)
 
-        ok, path = self._download_with_url(zip_url, header_name)
+        ok, path = self._download_with_url(zip_url, header_name, force)
         if ok and path:
             ok2, msg, final_path = self.process_downloaded_file(path)
             if ok2:
