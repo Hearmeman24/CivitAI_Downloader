@@ -131,7 +131,7 @@ class CivitAIDownloader:
     # --- Metadata (kept for optional use) --------------------------------------
 
     def get_model_info(self, model_id: str) -> Optional[str]:
-        """Fetch model metadata from CivitAI API and return the first file name."""
+        """Fetch model metadata from CivitAI API and return the primary model file name."""
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         url = f"{CIVITAI_API_BASE}/v1/model-versions/{model_id}"
 
@@ -140,7 +140,23 @@ class CivitAIDownloader:
             response.raise_for_status()
             data = response.json()
             if "files" in data and data["files"]:
-                return data["files"][0].get("name")
+                files = data["files"]
+                # Prefer the primary file marked by the API
+                for f in files:
+                    if f.get("primary"):
+                        return f.get("name")
+                # Fallback: prefer SafeTensor model files over training data/other
+                for f in files:
+                    if (
+                        f.get("type") == "Model"
+                        and f.get("metadata", {}).get("format") == "SafeTensor"
+                    ):
+                        return f.get("name")
+                # Last resort: first Model-type file
+                for f in files:
+                    if f.get("type") == "Model":
+                        return f.get("name")
+                return files[0].get("name")
             print(f"{STATUS['error']} No files found in model metadata")
             return None
         except requests.RequestException as e:
@@ -269,7 +285,7 @@ class CivitAIDownloader:
         """
         # Resolve redirect to get direct B2 URL and filename
         resolved_url, redirect_filename = self._resolve_redirect(download_url)
-        filename = prefer_filename or redirect_filename or "download.bin"
+        filename = redirect_filename or prefer_filename or "download.bin"
 
         file_path = self.output_dir / filename
 
