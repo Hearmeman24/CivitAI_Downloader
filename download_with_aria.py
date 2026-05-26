@@ -317,6 +317,7 @@ class CivitAIDownloader:
             f"--max-connection-per-server={ARIA2_CONNECTIONS}",
             f"--split={ARIA2_SPLITS}",
             "--continue=true",
+            "--file-allocation=none",
             "--auto-file-renaming=false",
             "--allow-overwrite=true",
             f"--summary-interval={PROGRESS_INTERVAL}",
@@ -378,15 +379,17 @@ class CivitAIDownloader:
         self, model_id: str, prefer_filename: Optional[str], force: bool = False
     ) -> Tuple[bool, Optional[Path]]:
         """
-        Try SafeTensor first, then Diffusers ZIP as fallback.
+        Try the version's primary file first, then Diffusers ZIP as fallback.
         prefer_filename: user-supplied target name (may be None).
         Returns (ok, final_path or None).
         """
-        # --- Attempt 1: SafeTensor format --------------------------------------
-        params = {"type": "Model", "format": "SafeTensor"}
+        # --- Attempt 1: primary file (SafeTensor, GGUF, Pickle, ...) -----------
+        # Omitting `format=` lets Civitai serve whatever the version's primary
+        # file is — hardcoding format=SafeTensor 404s on GGUF/Pickle versions.
+        params = {"type": "Model"}
         if self.token:
             params["token"] = self.token
-        safetensor_url = (
+        primary_url = (
             f"{CIVITAI_API_BASE}/download/models/{model_id}?{urlencode(params)}"
         )
 
@@ -398,7 +401,7 @@ class CivitAIDownloader:
             # cleanup any incomplete prior attempt
             self.cleanup_incomplete_download(self.output_dir / target_name)
 
-        ok, path = self._download_with_url(safetensor_url, target_name, force)
+        ok, path = self._download_with_url(primary_url, target_name, force)
         if ok and path:
             ok2, msg, final_path = self.process_downloaded_file(path)
             if ok2:
@@ -408,7 +411,7 @@ class CivitAIDownloader:
                 print(f"{STATUS['error']} Processing failed: {msg}")
 
         print(
-            f"{STATUS['warning']} SafeTensor format attempt did not succeed; trying Diffusers ZIP"
+            f"{STATUS['warning']} Primary download did not succeed; trying Diffusers ZIP"
         )
 
         # --- Attempt 2: Diffusers format (ZIP) ---------------------------------
