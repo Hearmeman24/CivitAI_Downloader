@@ -289,7 +289,17 @@ class CivitAIDownloader:
 
         file_path = self.output_dir / filename
 
+        aria2_control = file_path.with_suffix(file_path.suffix + ARIA2_EXT)
+
+        # --force means "ignore whatever is on disk and start fresh": wipe the
+        # partial AND the .aria2 control file so --continue has nothing stale to
+        # resume. Without this, force silently resumes and can't recover a wedged
+        # download (e.g. a control file whose length no longer matches the server).
+        if force:
+            self.cleanup_incomplete_download(file_path)
+
         # Check if file already exists and is valid (unless force is True)
+        resuming = False
         if not force and file_path.exists():
             is_valid, message = self.validate_file(file_path)
             if is_valid:
@@ -297,14 +307,27 @@ class CivitAIDownloader:
                     f"{STATUS['success']} File already exists and is valid: {file_path.name} ({message})"
                 )
                 return True, file_path
+            elif aria2_control.exists():
+                # A partial file WITH its .aria2 control file is resumable:
+                # aria2 verified the completed byte ranges, so --continue finishes
+                # it safely. Deleting here would defeat the whole point of resume.
+                print(f"{STATUS['download']} Resuming interrupted download: {file_path.name}")
+                resuming = True
             else:
+                # Orphaned partial with no resume state -> can't trust it, start clean.
                 print(
                     f"{STATUS['warning']} Existing file is invalid: {message}. Re-downloading..."
                 )
                 self.cleanup_incomplete_download(file_path)
+        elif not force and aria2_control.exists():
+            # Control file with no data file: aria2c aborts on --continue against
+            # this, and it never self-heals. Drop the stale control and start fresh.
+            print(f"{STATUS['cleanup']} Removing stale aria2 control file (no data file)")
+            aria2_control.unlink(missing_ok=True)
 
-        # Only use unique filename generation if we're actually going to download and not forcing
-        if not force:
+        # Only use unique filename generation if we're actually going to download,
+        # not forcing, and not resuming (resuming must reuse the exact same name).
+        if not force and not resuming:
             file_path = self._get_unique_filename(
                 file_path
             )  # avoid accidental overwrite collisions
@@ -397,9 +420,8 @@ class CivitAIDownloader:
         target_name = prefer_filename
         if not target_name:
             target_name = self.get_model_info(model_id)
-        if target_name:
-            # cleanup any incomplete prior attempt
-            self.cleanup_incomplete_download(self.output_dir / target_name)
+        # NOTE: no preemptive cleanup here — _download_with_url decides per-file
+        # whether to skip (valid), resume (partial + .aria2), or re-download.
 
         ok, path = self._download_with_url(primary_url, target_name, force)
         if ok and path:
@@ -425,9 +447,7 @@ class CivitAIDownloader:
         if prefer_filename:
             header_name = f"{Path(prefer_filename).stem}_diffusers.zip"
 
-        # cleanup stale
-        if header_name:
-            self.cleanup_incomplete_download(self.output_dir / header_name)
+        # no preemptive cleanup — _download_with_url handles skip/resume/redownload
 
         ok, path = self._download_with_url(zip_url, header_name, force)
         if ok and path:
