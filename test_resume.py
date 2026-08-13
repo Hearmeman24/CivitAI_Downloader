@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Verify _download_with_url's skip / resume / re-download decision.
 
-Runs offline: _resolve_redirect and aria2c (subprocess.run) are stubbed so we
+Runs offline: _resolve_redirect and aria2c (_run_aria2c) are stubbed so we
 only assert the decision logic around the aria2 control (.aria2) file.
 """
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -28,14 +27,14 @@ def run_case(make_files, force=False):
         # stub aria2c: record argv + on-disk state, "complete" the download
         captured = {}
 
-        def fake_run(cmd, **kw):
+        def fake_run(cmd):
             captured["cmd"] = cmd
             captured["control_at_invoke"] = (d / (MODEL + dwa.ARIA2_EXT)).exists()
             (d / MODEL).write_bytes(b"0" * (2 * 1024 * 1024))  # 2MB > MIN_FILE_MB
             (d / (MODEL + dwa.ARIA2_EXT)).unlink(missing_ok=True)  # aria2 clears control on finish
-            return subprocess.CompletedProcess(cmd, 0)
+            return 0  # aria2c exit code
 
-        dwa.subprocess.run = fake_run
+        dl._run_aria2c = fake_run
         dl._download_with_url("http://civitai/redirect", MODEL, force=force)
         return captured
 

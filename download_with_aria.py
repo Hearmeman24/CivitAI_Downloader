@@ -44,6 +44,19 @@ STATUS = {
     "file": "📁",
 }
 
+# CivitAI authenticates downloads with a token in the query string, so the
+# secret rides along in every URL we build. aria2c echoes that URL in its
+# warnings and result summary, and requests embeds it in exception text, so
+# anything on its way to the console goes through redact() first.
+_TOKEN_RE = re.compile(
+    r"((?:[?&](?:token|api_key)=)|(?:Bearer\s+))([^&\s\"'\\]+)", re.IGNORECASE
+)
+
+
+def redact(value) -> str:
+    """Mask API tokens in anything about to be printed."""
+    return _TOKEN_RE.sub(lambda m: f"{m.group(1)}***", str(value))
+
 
 class CivitAIDownloader:
     """Handles downloading and processing of CivitAI model files."""
@@ -125,7 +138,7 @@ class CivitAIDownloader:
                 )
                 return url, None
         except requests.RequestException as e:
-            print(f"{STATUS['warning']} Could not resolve download URL: {e}")
+            print(f"{STATUS['warning']} Could not resolve download URL: {redact(e)}")
             return url, None
 
     # --- Metadata (kept for optional use) --------------------------------------
@@ -275,6 +288,25 @@ class CivitAIDownloader:
 
     # --- Download core ----------------------------------------------------------
 
+    def _run_aria2c(self, cmd: list) -> int:
+        """Run aria2c, streaming its output with any token masked.
+
+        aria2c prints the request URI in its warnings and in the
+        --download-result summary, so its output cannot go straight to the
+        terminal while the URL carries the token. Streaming line by line keeps
+        the periodic progress summary live.
+        """
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        for line in proc.stdout:
+            print(redact(line), end="")
+        return proc.wait()
+
     def _download_with_url(
         self, download_url: str, prefer_filename: Optional[str], force: bool = False
     ) -> Tuple[bool, Optional[Path]]:
@@ -355,7 +387,10 @@ class CivitAIDownloader:
         print(f"{STATUS['info']} Using {ARIA2_CONNECTIONS} connections")
 
         try:
-            subprocess.run(cmd, check=True, capture_output=False)
+            returncode = self._run_aria2c(cmd)
+            if returncode != 0:
+                print(f"{STATUS['error']} Download failed: aria2c exited {returncode}")
+                return False, None
 
             # Validate expected file or discover last modified in case server changed it
             print(f"{STATUS['info']} Checking for downloaded files...")
@@ -388,9 +423,6 @@ class CivitAIDownloader:
             print(f"{STATUS['success']} Download complete: {message}")
             return True, actual
 
-        except subprocess.CalledProcessError as e:
-            print(f"{STATUS['error']} Download failed: {e}")
-            return False, None
         except FileNotFoundError:
             print(f"{STATUS['error']} aria2c not found. Please install aria2.")
             print("  Ubuntu/Debian: sudo apt-get install aria2")
@@ -546,7 +578,7 @@ Examples:
         print(f"\n{STATUS['warning']} Download interrupted by user")
         sys.exit(130)
     except Exception as e:
-        print(f"{STATUS['error']} Unexpected error: {e}")
+        print(f"{STATUS['error']} Unexpected error: {redact(e)}")
         sys.exit(1)
 
 
