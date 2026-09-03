@@ -1,88 +1,116 @@
 #!/usr/bin/env python3
-"""Verify _download_with_url's skip / resume / re-download decision.
+"""Behavior tests for cached, resumable, stale, and forced transfer state."""
 
-Runs offline: _resolve_redirect and aria2c (_run_aria2c) are stubbed so we
-only assert the decision logic around the aria2 control (.aria2) file.
-"""
+import hashlib
+import os
 import tempfile
+import unittest
 from pathlib import Path
 
 import download_with_aria as dwa
 
-MODEL = "sha.safetensors"
+PAYLOAD = b"verified model payload"
+SHA256 = hashlib.sha256(PAYLOAD).hexdigest().upper()
 
 
-def run_case(make_files, force=False):
-    """Set up a temp dir via make_files(dir), run a download, return (aria2_argv or None).
-
-    Records the state (partial present? control present?) at the moment aria2c is
-    invoked, so we can assert what cleanup ran BEFORE the download.
-    """
-    with tempfile.TemporaryDirectory() as td:
-        d = Path(td)
-        make_files(d)
-        dl = dwa.CivitAIDownloader(token="x", output_dir=str(d))
-        # stub redirect: always resolves to a stable filename, no network
-        dl._resolve_redirect = lambda url: ("http://direct/file", MODEL)
-        # stub aria2c: record argv + on-disk state, "complete" the download
-        captured = {}
-
-        def fake_run(cmd):
-            captured["cmd"] = cmd
-            captured["control_at_invoke"] = (d / (MODEL + dwa.ARIA2_EXT)).exists()
-            (d / MODEL).write_bytes(b"0" * (2 * 1024 * 1024))  # 2MB > MIN_FILE_MB
-            (d / (MODEL + dwa.ARIA2_EXT)).unlink(missing_ok=True)  # aria2 clears control on finish
-            return 0  # aria2c exit code
-
-        dl._run_aria2c = fake_run
-        dl._download_with_url("http://civitai/redirect", MODEL, force=force)
-        return captured
+def resource():
+    return dwa.ResolvedCivitAIResource(
+        original="20",
+        model_id="10",
+        version_id="20",
+        file_id="30",
+        filename="model.safetensors",
+        size_bytes=len(PAYLOAD),
+        sha256=SHA256,
+        file_type="Model",
+        file_format="SafeTensor",
+    )
 
 
-def out_name(cmd):
-    return next(a.split("=", 1)[1] for a in cmd if a.startswith("--out="))
+def staging_paths(output: Path):
+    key = hashlib.sha256(b"model.safetensors").hexdigest()[:12]
+    staging = output / f".civitai-30-{key}.part"
+    return staging, Path(f"{staging}{dwa.ARIA2_EXT}")
 
 
-# Case 1: resumable partial (file + .aria2) -> aria2 runs, SAME name, control file PRESERVED into the download
-def resumable(d):
-    (d / MODEL).write_bytes(b"0" * 1024)          # small partial
-    (d / (MODEL + dwa.ARIA2_EXT)).write_bytes(b"ctl")  # resume state present
-c = run_case(resumable)
-assert c.get("cmd") is not None, "resume: aria2c should run"
-assert out_name(c["cmd"]) == MODEL, f"resume: must reuse exact name, got {out_name(c['cmd'])}"
-assert "--continue=true" in c["cmd"]
-assert c["control_at_invoke"], "resume: .aria2 control file must survive into the aria2c call"
-print("ok: resumable partial resumes under the same filename, control preserved")
+class ResumeTests(unittest.TestCase):
+    def run_case(self, setup, force=False):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td)
+            staging, control = staging_paths(output)
+            setup(output, staging, control)
+            downloader = dwa.CivitAIDownloader("token", output)
+            downloader._resolve_download_url = lambda _: "https://files.example/signed"
+            captured = {"calls": 0}
 
-# Case 2: orphaned partial (file, NO .aria2) -> deleted & re-downloaded fresh
-def orphaned(d):
-    (d / MODEL).write_bytes(b"0" * 1024)          # partial, no control file
-c = run_case(orphaned)
-assert c.get("cmd") is not None and out_name(c["cmd"]) == MODEL
-print("ok: orphaned partial re-downloads")
+            def fake_aria(cmd, source):
+                captured["calls"] += 1
+                captured["control_at_invoke"] = control.exists()
+                captured["staging_size_at_invoke"] = (
+                    staging.stat().st_size if staging.exists() else None
+                )
+                out_name = next(
+                    item.split("=", 1)[1] for item in cmd if item.startswith("--out=")
+                )
+                self.assertEqual(out_name, staging.name)
+                staging.write_bytes(PAYLOAD)
+                if os.path.lexists(control):
+                    control.unlink()
+                return dwa.AriaResult(0, ())
 
-# Case 3: complete valid file (no .aria2, >=1MB) -> skipped entirely, aria2c never runs
-def complete(d):
-    (d / MODEL).write_bytes(b"0" * (2 * 1024 * 1024))
-c = run_case(complete)
-assert c.get("cmd") is None, "complete: aria2c must NOT run for an already-valid file"
-print("ok: complete file is skipped")
+            downloader._run_aria2c = fake_aria
+            outcome = downloader._download_resource(resource(), force=force)
+            captured["outcome"] = outcome
+            captured["bytes"] = outcome.path.read_bytes()
+            return captured
 
-# Case 4: --force with a stale partial + .aria2 -> control WIPED before download (no accidental resume)
-def force_stale(d):
-    (d / MODEL).write_bytes(b"0" * 1024)
-    (d / (MODEL + dwa.ARIA2_EXT)).write_bytes(b"ctl")
-c = run_case(force_stale, force=True)
-assert c.get("cmd") is not None, "force: aria2c should run"
-assert not c["control_at_invoke"], "force: stale .aria2 must be deleted before download"
-print("ok: --force wipes stale resume state")
+    def test_partial_with_control_resumes_same_staging_file(self):
+        def setup(output, staging, control):
+            staging.write_bytes(PAYLOAD[:5])
+            control.write_bytes(b"aria state")
 
-# Case 5: orphaned control file (control, NO data file) -> control removed, fresh download
-def orphaned_control(d):
-    (d / (MODEL + dwa.ARIA2_EXT)).write_bytes(b"ctl")  # control with no data file
-c = run_case(orphaned_control)
-assert c.get("cmd") is not None, "orphaned-control: aria2c should run"
-assert not c["control_at_invoke"], "orphaned-control: stale .aria2 must be removed"
-print("ok: orphaned control file is cleaned up")
+        captured = self.run_case(setup)
+        self.assertEqual(captured["calls"], 1)
+        self.assertTrue(captured["control_at_invoke"])
+        self.assertEqual(captured["staging_size_at_invoke"], 5)
+        self.assertEqual(captured["outcome"].status, "resumed")
+        self.assertEqual(captured["bytes"], PAYLOAD)
 
-print("\nall resume-logic checks passed")
+    def test_orphaned_partial_is_discarded_before_fresh_download(self):
+        def setup(output, staging, control):
+            staging.write_bytes(b"bad partial")
+
+        captured = self.run_case(setup)
+        self.assertIsNone(captured["staging_size_at_invoke"])
+        self.assertEqual(captured["outcome"].status, "downloaded")
+
+    def test_verified_existing_target_is_cached(self):
+        def setup(output, staging, control):
+            (output / "model.safetensors").write_bytes(PAYLOAD)
+
+        captured = self.run_case(setup)
+        self.assertEqual(captured["calls"], 0)
+        self.assertEqual(captured["outcome"].status, "cached")
+
+    def test_force_removes_target_partial_and_control_before_download(self):
+        def setup(output, staging, control):
+            (output / "model.safetensors").write_bytes(PAYLOAD)
+            staging.write_bytes(b"partial")
+            control.write_bytes(b"aria state")
+
+        captured = self.run_case(setup, force=True)
+        self.assertFalse(captured["control_at_invoke"])
+        self.assertIsNone(captured["staging_size_at_invoke"])
+        self.assertEqual(captured["outcome"].status, "downloaded")
+
+    def test_orphaned_control_is_removed_before_fresh_download(self):
+        def setup(output, staging, control):
+            control.write_bytes(b"orphaned aria state")
+
+        captured = self.run_case(setup)
+        self.assertFalse(captured["control_at_invoke"])
+        self.assertEqual(captured["outcome"].status, "downloaded")
+
+
+if __name__ == "__main__":
+    unittest.main()

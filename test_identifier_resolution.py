@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Behavior checks for CivitAI model/version/file identifier resolution."""
 
+import hashlib
+import io
 import tempfile
 import unittest
 from urllib.parse import parse_qs, urlparse
@@ -11,6 +13,8 @@ MODEL_ID = "2834417"
 VERSION_ID = "3268303"
 FILE_ID = "3152083"
 FILENAME = "HMNSFW-AIO-V2.5.safetensors"
+FILE_BYTES = b"model payload"
+FILE_SHA256 = hashlib.sha256(FILE_BYTES).hexdigest().upper()
 
 
 def version_data(model_id=MODEL_ID, version_id=VERSION_ID, file_id=FILE_ID):
@@ -26,6 +30,8 @@ def version_data(model_id=MODEL_ID, version_id=VERSION_ID, file_id=FILE_ID):
                 "type": "Model",
                 "primary": True,
                 "metadata": {"format": "SafeTensor", "fp": "fp16"},
+                "sizeKB": len(FILE_BYTES) / 1024,
+                "hashes": {"SHA256": FILE_SHA256},
             }
         ],
     }
@@ -100,7 +106,11 @@ class ParseIdentifierTests(unittest.TestCase):
 
 class ResolveIdentifierTests(unittest.TestCase):
     def downloader(self):
-        return dwa.CivitAIDownloader(token="test-token", output_dir=tempfile.mkdtemp())
+        return dwa.CivitAIDownloader(
+            token="test-token",
+            output_dir=tempfile.mkdtemp(),
+            logger=dwa.StructuredLogger(io.StringIO()),
+        )
 
     def test_model_id_resolves_to_default_version_and_primary_file(self):
         dl = self.downloader()
@@ -153,6 +163,15 @@ class ResolveIdentifierTests(unittest.TestCase):
         with self.assertRaisesRegex(dwa.IdentifierError, "file 999"):
             dl.resolve_identifier("civitai:2834417@3268303+999")
 
+    def test_missing_published_sha256_fails_closed(self):
+        dl = self.downloader()
+        unverified = version_data()
+        unverified["files"][0]["hashes"] = {}
+        dl._fetch_version = lambda value: unverified
+
+        with self.assertRaisesRegex(dwa.IntegrityError, "no valid SHA-256"):
+            dl.resolve_identifier("version:3268303")
+
     def test_unambiguous_bare_model_or_version_ids_just_work(self):
         dl = self.downloader()
         dl._fetch_model = lambda value: model_data() if value == MODEL_ID else None
@@ -193,29 +212,36 @@ class ResolveIdentifierTests(unittest.TestCase):
             version_id=VERSION_ID,
             file_id=FILE_ID,
             filename=FILENAME,
+            size_bytes=len(FILE_BYTES),
+            sha256=FILE_SHA256,
+            file_type="Model",
+            file_format="SafeTensor",
         )
         calls = []
 
-        def fake_download(url, prefer_filename, force=False):
-            calls.append((url, prefer_filename, force))
-            return False, None
+        def fake_resolve(url):
+            calls.append(url)
+            return "https://files.example/signed"
 
-        dl._download_with_url = fake_download
+        def fake_aria(cmd, source):
+            out_name = next(
+                item.split("=", 1)[1] for item in cmd if item.startswith("--out=")
+            )
+            (dl.output_dir / out_name).write_bytes(FILE_BYTES)
+            return dwa.AriaResult(0, ())
+
+        dl._resolve_download_url = fake_resolve
+        dl._run_aria2c = fake_aria
 
         ok, path = dl.download_with_aria2("civitai:2834417@3268303+3152083", None)
 
-        self.assertFalse(ok)
-        self.assertIsNone(path)
-        self.assertEqual(
-            len(calls),
-            1,
-            "an exact file failure must not fall back to another file",
-        )
-        parsed = urlparse(calls[0][0])
+        self.assertTrue(ok)
+        self.assertEqual(path.name, FILENAME)
+        self.assertEqual(len(calls), 1)
+        parsed = urlparse(calls[0])
         self.assertEqual(parsed.path, "/api/download/models/3268303")
         self.assertEqual(parse_qs(parsed.query)["fileId"], [FILE_ID])
         self.assertEqual(parse_qs(parsed.query)["token"], ["test-token"])
-        self.assertEqual(calls[0][1], FILENAME)
 
 
 if __name__ == "__main__":

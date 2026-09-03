@@ -1,255 +1,166 @@
-# CivitAI Model Downloader 🚀
+# CivitAI Model Downloader
 
-A robust Python script for downloading AI models (LoRA, Checkpoints, Embeddings) from CivitAI with intelligent file handling, automatic ZIP extraction, and resume support.
+A local command-line downloader for CivitAI LoRAs, checkpoints, embeddings, and
+other model files. It resolves flexible CivitAI identifiers, selects one exact
+file, downloads it with aria2, verifies CivitAI's published SHA-256 and size, and
+only then makes the result visible under its final filename.
 
-## ✨ Features
+## What it provides
 
-- **🔄 Smart Download Management** - Multi-connection downloads with aria2 for maximum speed
-- **📦 Automatic ZIP Processing** - Extracts and filters `.safetensors` files automatically
-- **🔧 Resume Support** - Continue interrupted downloads without starting over
-- **✅ File Validation** - Detects and cleans up corrupted or incomplete downloads
-- **🔐 Secure Token Handling** - Supports environment variables for API authentication
-- **📊 Progress Tracking** - Real-time download progress with clear status indicators
-- **🎯 Intelligent File Management** - Handles naming conflicts and cleans up temporary files
-- **🧭 Flexible CivitAI Identifiers** - Accepts model IDs, version IDs, model/download URLs, and AIR strings
-- **🎯 Exact File Selection** - Honors the `+file-id` in CivitAI AIR strings instead of guessing among version files
+- Model IDs, model-version IDs, AIR strings, model-page URLs, and download URLs
+- Exact `+file-id` selection from current CivitAI AIR identifiers
+- SHA-256 and exact-size verification for cached and downloaded files
+- Resumable aria2 transfers into private `.part` staging files
+- Atomic promotion to the final filename after verification
+- Bounded retries for rate limits, transient server errors, and connection failures
+- Output-directory confinement, portable filename validation, and symlink refusal
+- Per-filename process locks for concurrent invocations
+- Bounded ZIP extraction that keeps only `.safetensors` members
+- Two concise structured log lines for a normal successful download
 
-## 📋 Requirements
+`download_with_aria.py` is the canonical implementation. `download.py` is only a
+compatibility entry point and delegates to the same implementation.
 
-- Python 3.6+
-- [aria2](https://aria2.github.io/) - High-speed download utility
-- [requests](https://pypi.org/project/requests/) - HTTP library for API calls
+## Requirements
 
-## 🔧 Installation
+- Python 3.10 or newer
+- [aria2](https://aria2.github.io/)
+- Python packages from `requirements.txt`
 
-### 1. Install aria2
+Install aria2:
 
-**Ubuntu/Debian:**
 ```bash
+# Ubuntu/Debian
 sudo apt-get install aria2
-```
 
-**macOS:**
-```bash
+# macOS
 brew install aria2
 ```
 
-**Windows:**
-Download from [aria2 releases](https://github.com/aria2/aria2/releases)
-
-### 2. Install Python dependencies
+Install the Python dependency:
 
 ```bash
-pip install requests
+python3 -m pip install --requirement requirements.txt
 ```
 
-### 3. Download the script
+To download only the standalone canonical script, use GitHub's raw endpoint:
 
 ```bash
-wget https://github.com/Hearmeman24/CivitAI_Downloader/blob/main/download_with_aria.py
+curl --fail --location \
+  --output download_with_aria.py \
+  https://raw.githubusercontent.com/Hearmeman24/CivitAI_Downloader/main/download_with_aria.py
 chmod +x download_with_aria.py
+python3 -m pip install 'requests==2.34.2'
 ```
 
-## 🔑 Authentication
+## Authentication
 
-Get your CivitAI API token from [CivitAI Account Settings](https://civitai.com/user/account).
-
-Set it as an environment variable:
+Create a CivitAI API token in your CivitAI account settings and expose it only to
+the downloader process:
 
 ```bash
-export CIVITAI_TOKEN="your_token_here"
+export CIVITAI_TOKEN="your-token"
 ```
 
-Or add to your `~/.bashrc` or `~/.zshrc` for permanent use:
+The backward-compatible `--token` option is available, but the environment
+variable is preferred because command-line arguments may be visible in shell
+history and process listings. The CivitAI token is never forwarded to aria2c;
+only CivitAI's short-lived signed storage URL is sent to aria2 over standard input.
+
+## Usage
+
+All identifier forms use the same argument:
 
 ```bash
-echo 'export CIVITAI_TOKEN="your_token_here"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-## 📖 Usage
-
-### Basic Usage
-
-Paste a model ID, model-version ID, model page URL, download URL, or complete
-CivitAI AIR identifier into the same argument:
-
-```bash
-./download_with_aria.py -m 3268303
-./download_with_aria.py -m model:2834417
-./download_with_aria.py -m 'civitai:2834417@3268303+3152083'
-```
-
-A plain number is checked as both a model ID and a model-version ID. A model ID
-downloads that model's default (first listed) published version; a version ID
-downloads that version's primary file. If the number exists in both namespaces,
-the downloader stops instead of risking the wrong download—prefix it with
-`model:` or `version:` to choose explicitly.
-
-The new file ID is honored when it arrives with its required context, such as
-`civitai:2834417@3268303+3152083` or
-`https://civitai.com/api/download/models/3268303?fileId=3152083`. CivitAI does
-not expose a public file-ID-to-version reverse lookup, so a bare file ID by
-itself cannot be resolved safely; paste the complete AIR or URL shown by
-CivitAI.
-
-### Advanced Options
-
-```bash
-# Download to specific directory
-./download_with_aria.py -m 123456 -o ./models
-
-# Use custom filename
-./download_with_aria.py -m 123456 --filename "my_custom_model.safetensors"
-
-# Force re-download (ignore existing files)
-./download_with_aria.py -m 123456 --force
-
-# Provide token via command line (not recommended for security)
-./download_with_aria.py -m 123456 --token "your_token_here"
-```
-
-### Command Line Arguments
-
-| Argument | Short | Description | Default |
-|----------|-------|-------------|---------|
-| `--identifier` (`--model-id` alias) | `-m` | CivitAI model/version ID, model/download URL, or AIR (required) | - |
-| `--output` | `-o` | Output directory | Current directory |
-| `--token` | - | CivitAI API token | From environment |
-| `--filename` | - | Override default filename | From API |
-| `--force` | - | Force re-download | False |
-
-## 🎯 Examples
-
-### Download a LoRA model
-```bash
-# Any unambiguous plain model or version ID
+# Bare model or version ID, auto-detected
 ./download_with_aria.py -m 3268303
 
-# Explicit IDs (useful if a plain number is ambiguous)
+# Explicit disambiguation
 ./download_with_aria.py -m model:2834417
 ./download_with_aria.py -m version:3268303
 
-# Exact file from the AIR shown on CivitAI
+# Exact AIR file
+./download_with_aria.py -m 'civitai:2834417@3268303+3152083'
 ./download_with_aria.py -m 'urn:air:minimaxh3:lora:civitai:2834417@3268303+3152083'
 
-# A copied CivitAI model page works too
-./download_with_aria.py -m 'https://civitai.com/models/2834417?modelVersionId=3268303'
+# Copied CivitAI URLs
+./download_with_aria.py -m \
+  'https://civitai.com/models/2834417?modelVersionId=3268303'
+./download_with_aria.py -m \
+  'https://civitai.com/api/download/models/3268303?fileId=3152083'
 ```
 
-### Download multiple models to organized folders
-```bash
-# Download character LoRA
-./download_with_aria.py -m 245589 -o ./models/lora/characters
+A bare number is checked as both a model and a model-version ID. If it exists in
+both namespaces, the downloader stops and asks for `model:<id>` or `version:<id>`
+instead of guessing. CivitAI does not expose a public reverse lookup from a bare
+file ID to its version, so a file ID by itself requires the complete AIR or URL.
 
-# Download style LoRA
-./download_with_aria.py -m 234567 -o ./models/lora/styles
+Other options:
 
-# Download checkpoint
-./download_with_aria.py -m 345678 -o ./models/checkpoints
+```text
+-o, --output DIRECTORY   Destination directory; defaults to the current directory
+--filename NAME          Portable filename override; paths are rejected
+--force                  Re-download and replace only the confined exact target
+--token TOKEN            Backward-compatible token input; environment is safer
 ```
 
-### Batch download with a simple script
-```bash
-#!/bin/bash
-# download_batch.sh
+## Concise structured logs
 
-models=(245589 234567 345678 456789)
-for model_id in "${models[@]}"; do
-    ./download_with_aria.py -m "$model_id" -o ./models
-done
+A normal successful download emits exactly two lines:
+
+```text
+INFO resolve model=2834417 version=3268303 file=3152083 name=HMNSFW-AIO-V2.5.safetensors format=SafeTensor
+OK ready status=downloaded bytes=86040232 sha256=A07732A84FD733085EB5D910F602F918FA7A3658117116927E4329F5951A9D2D files=1 path=/models/HMNSFW-AIO-V2.5.safetensors
 ```
 
-## 🔍 How It Works
+Cached and resumed downloads use `status=cached` or `status=resumed`. A failure
+adds one terminal `ERROR failure stage=... message=...` line; aria2 progress and
+multi-line exception dumps are intentionally suppressed.
 
-1. **Resolves the Input** - Classifies a model ID, version ID, CivitAI URL, or AIR without guessing across ambiguous ID namespaces
-2. **Selects the Exact File** - Uses an AIR/URL file ID when supplied, otherwise selects the resolved version's primary file
-3. **Validates Existing Files** - Checks if a valid file already exists
-4. **Downloads with aria2** - Uses 8 parallel connections for speed
-5. **Processes Downloaded Files**:
-   - `.safetensors` - Keeps as-is
-   - `.zip` - Extracts only `.safetensors` files, removes archive
-   - Other formats - Keeps as downloaded
-6. **Cleanup** - Removes temporary files and failed downloads
+## Safety and recovery behavior
 
-## 📊 Status Indicators
+- A file is ready only when its exact byte count and SHA-256 match CivitAI metadata.
+- A wrong pre-existing file is preserved and the verified download receives a
+  unique filename. `--force` replaces only the validated target inside the output
+  directory.
+- Interrupted downloads remain in a deterministic hidden `.part` file with aria2's
+  `.aria2` control file and resume on the next identical invocation.
+- Concurrent attempts to write the same filename fail clearly instead of sharing a
+  partial file.
+- ZIP archives are inspected before extraction. Member count, expanded size,
+  compression ratio, output paths, and available disk space are bounded.
+- Files other than ZIP and Safetensors are downloaded but never executed. Treat
+  pickle-based model formats as untrusted input and prefer Safetensors where possible.
 
-The script uses clear emoji indicators for status:
+The tool is a local, single-download CLI, not a multi-tenant hosted service. Run it
+as a normal user rather than root and choose an output directory with appropriate
+filesystem permissions.
 
-- ✅ Success - Operation completed successfully
-- ❌ Error - Operation failed
-- ⚠️ Warning - Important notice
-- 🔍 Info - Information message
-- 📥 Download - Downloading file
-- 📦 Extract - Extracting archive
-- 🗑️ Cleanup - Removing temporary files
-- 📁 File - File operation
+## Verification
 
-## 🐛 Troubleshooting
-
-### "No CivitAI token provided"
-Set your token as an environment variable or use the `--token` argument.
-
-### "aria2c not found"
-Install aria2 using the installation instructions above.
-
-### "Download validation failed"
-The file may be corrupted. Use `--force` to re-download:
-```bash
-./download_with_aria.py -m 123456 --force
-```
-
-### Slow downloads
-CivitAI may throttle downloads. The script uses 8 connections by default for optimal speed.
-
-### "No safetensors files found in archive"
-Some models may use different formats. The original ZIP is kept in this case.
-
-### "ID is both a model ID and a version ID"
-The same number exists in two independent CivitAI namespaces. Re-run with
-`model:<id>` to use the model's default version or `version:<id>` to download
-that exact version.
-
-### "CivitAI could not find ... as a model or version ID"
-If you pasted only the new file ID, copy the complete AIR or download URL from
-CivitAI instead. The file ID needs its version ID to select the correct file.
-
-## ✅ Verification
-
-The checks are offline unless a test explicitly says otherwise:
+Install the development tools and run the complete offline suite:
 
 ```bash
-python3 test_identifier_resolution.py
-python3 test_resume.py
-python3 test_token_redaction.py
-python3 -m py_compile download_with_aria.py download.py test_*.py
+python3 -m pip install --requirement requirements-dev.txt
+python3 -m unittest discover -v
+python3 -m py_compile download.py download_with_aria.py test_*.py
+ruff check download.py download_with_aria.py test_*.py
+ruff format --check download.py download_with_aria.py test_*.py
+bandit --quiet --recursive download.py download_with_aria.py
 ```
 
-## 🤝 Contributing
+The live integration test downloads the exact AIR fixture into a temporary
+directory and verifies its published size, SHA-256, and two-line log contract:
 
-Contributions are welcome! Feel free to:
+```bash
+CIVITAI_INTEGRATION=1 CIVITAI_TOKEN="your-token" \
+  python3 -m unittest -v test_integration_civitai
+```
 
-- Report bugs
-- Suggest new features
-- Submit pull requests
+GitHub Actions runs the offline suite on Python 3.10, 3.12, and 3.14. The live test
+is available through manual workflow dispatch when the repository has a
+`CIVITAI_TOKEN` Actions secret.
 
-## 📄 License
+## License
 
-MIT License - feel free to use this script in your projects.
-
-## 🙏 Acknowledgments
-
-- [CivitAI](https://civitai.com) for providing the API and hosting models
-- [aria2](https://aria2.github.io/) for the excellent download utility
-- The AI art community for creating and sharing models
-
-## 📝 Notes
-
-- Always respect model licenses and creator terms
-- Be mindful of CivitAI's rate limits and terms of service
-- Large checkpoint files (>5GB) may take significant time to download
-- The script requires a stable internet connection for resume to work properly
-
----
-
-**Need help?** Open an issue on GitHub or check CivitAI's documentation for model-specific questions.
+MIT
