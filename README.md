@@ -11,6 +11,8 @@ A robust Python script for downloading AI models (LoRA, Checkpoints, Embeddings)
 - **🔐 Secure Token Handling** - Supports environment variables for API authentication
 - **📊 Progress Tracking** - Real-time download progress with clear status indicators
 - **🎯 Intelligent File Management** - Handles naming conflicts and cleans up temporary files
+- **🧭 Flexible CivitAI Identifiers** - Accepts model IDs, version IDs, model/download URLs, and AIR strings
+- **🎯 Exact File Selection** - Honors the `+file-id` in CivitAI AIR strings instead of guessing among version files
 
 ## 📋 Requirements
 
@@ -69,11 +71,27 @@ source ~/.bashrc
 
 ### Basic Usage
 
-Download a model using its ID:
+Paste a model ID, model-version ID, model page URL, download URL, or complete
+CivitAI AIR identifier into the same argument:
 
 ```bash
-./download_with_aria.py -m 123456
+./download_with_aria.py -m 3268303
+./download_with_aria.py -m model:2834417
+./download_with_aria.py -m 'civitai:2834417@3268303+3152083'
 ```
+
+A plain number is checked as both a model ID and a model-version ID. A model ID
+downloads that model's default (first listed) published version; a version ID
+downloads that version's primary file. If the number exists in both namespaces,
+the downloader stops instead of risking the wrong download—prefix it with
+`model:` or `version:` to choose explicitly.
+
+The new file ID is honored when it arrives with its required context, such as
+`civitai:2834417@3268303+3152083` or
+`https://civitai.com/api/download/models/3268303?fileId=3152083`. CivitAI does
+not expose a public file-ID-to-version reverse lookup, so a bare file ID by
+itself cannot be resolved safely; paste the complete AIR or URL shown by
+CivitAI.
 
 ### Advanced Options
 
@@ -95,7 +113,7 @@ Download a model using its ID:
 
 | Argument | Short | Description | Default |
 |----------|-------|-------------|---------|
-| `--model-id` | `-m` | CivitAI model version ID (required) | - |
+| `--identifier` (`--model-id` alias) | `-m` | CivitAI model/version ID, model/download URL, or AIR (required) | - |
 | `--output` | `-o` | Output directory | Current directory |
 | `--token` | - | CivitAI API token | From environment |
 | `--filename` | - | Override default filename | From API |
@@ -105,7 +123,18 @@ Download a model using its ID:
 
 ### Download a LoRA model
 ```bash
-./download_with_aria.py -m 245589
+# Any unambiguous plain model or version ID
+./download_with_aria.py -m 3268303
+
+# Explicit IDs (useful if a plain number is ambiguous)
+./download_with_aria.py -m model:2834417
+./download_with_aria.py -m version:3268303
+
+# Exact file from the AIR shown on CivitAI
+./download_with_aria.py -m 'urn:air:minimaxh3:lora:civitai:2834417@3268303+3152083'
+
+# A copied CivitAI model page works too
+./download_with_aria.py -m 'https://civitai.com/models/2834417?modelVersionId=3268303'
 ```
 
 ### Download multiple models to organized folders
@@ -133,14 +162,15 @@ done
 
 ## 🔍 How It Works
 
-1. **Fetches Model Info** - Queries CivitAI API for filename and metadata
-2. **Validates Existing Files** - Checks if valid file already exists
-3. **Downloads with aria2** - Uses 8 parallel connections for speed
-4. **Processes Downloaded Files**:
+1. **Resolves the Input** - Classifies a model ID, version ID, CivitAI URL, or AIR without guessing across ambiguous ID namespaces
+2. **Selects the Exact File** - Uses an AIR/URL file ID when supplied, otherwise selects the resolved version's primary file
+3. **Validates Existing Files** - Checks if a valid file already exists
+4. **Downloads with aria2** - Uses 8 parallel connections for speed
+5. **Processes Downloaded Files**:
    - `.safetensors` - Keeps as-is
    - `.zip` - Extracts only `.safetensors` files, removes archive
    - Other formats - Keeps as downloaded
-5. **Cleanup** - Removes temporary files and failed downloads
+6. **Cleanup** - Removes temporary files and failed downloads
 
 ## 📊 Status Indicators
 
@@ -174,6 +204,26 @@ CivitAI may throttle downloads. The script uses 8 connections by default for opt
 
 ### "No safetensors files found in archive"
 Some models may use different formats. The original ZIP is kept in this case.
+
+### "ID is both a model ID and a version ID"
+The same number exists in two independent CivitAI namespaces. Re-run with
+`model:<id>` to use the model's default version or `version:<id>` to download
+that exact version.
+
+### "CivitAI could not find ... as a model or version ID"
+If you pasted only the new file ID, copy the complete AIR or download URL from
+CivitAI instead. The file ID needs its version ID to select the correct file.
+
+## ✅ Verification
+
+The checks are offline unless a test explicitly says otherwise:
+
+```bash
+python3 test_identifier_resolution.py
+python3 test_resume.py
+python3 test_token_redaction.py
+python3 -m py_compile download_with_aria.py download.py test_*.py
+```
 
 ## 🤝 Contributing
 

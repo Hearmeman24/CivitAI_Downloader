@@ -10,15 +10,15 @@ Changes:
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
-import zipfile
-import re
 import time
+import zipfile
 from pathlib import Path
 from typing import Optional, Tuple
-from urllib.parse import urlencode, unquote, urlparse, parse_qs
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 import requests
 
@@ -31,6 +31,7 @@ SAFETENSORS_EXT = ".safetensors"
 ZIP_EXT = ".zip"
 ARIA2_EXT = ".aria2"
 MIN_FILE_MB = 1  # basic sanity threshold
+CIVITAI_HOSTS = {"civitai.com", "civitai.green", "civitai.red"}
 
 # Status indicators for better UX
 STATUS = {
@@ -56,6 +57,170 @@ _TOKEN_RE = re.compile(
 def redact(value) -> str:
     """Mask API tokens in anything about to be printed."""
     return _TOKEN_RE.sub(lambda m: f"{m.group(1)}***", str(value))
+
+
+class IdentifierError(ValueError):
+    """A CivitAI identifier is invalid, ambiguous, or cannot be resolved safely."""
+
+
+class CivitAIReference:
+    """The IDs provided by one supported CivitAI identifier form."""
+
+    def __init__(
+        self,
+        original: str,
+        kind: str,
+        model_id: Optional[str] = None,
+        version_id: Optional[str] = None,
+        file_id: Optional[str] = None,
+    ):
+        self.original = original
+        self.kind = kind
+        self.model_id = model_id
+        self.version_id = version_id
+        self.file_id = file_id
+
+
+class ResolvedCivitAIResource:
+    """A verified CivitAI version and the exact file selected from it."""
+
+    def __init__(
+        self,
+        original: str,
+        model_id: str,
+        version_id: str,
+        file_id: str,
+        filename: str,
+    ):
+        self.original = original
+        self.model_id = model_id
+        self.version_id = version_id
+        self.file_id = file_id
+        self.filename = filename
+
+
+def _positive_id(value: Optional[str], label: str) -> Optional[str]:
+    """Validate and normalize a positive integer ID."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not re.fullmatch(r"[1-9]\d*", value):
+        raise IdentifierError(f"Invalid CivitAI {label}: expected a positive integer")
+    return value
+
+
+def _first_query_value(query, name: str) -> Optional[str]:
+    """Read a query parameter case-insensitively."""
+    for key, values in query.items():
+        if key.lower() == name.lower() and values:
+            return values[0]
+    return None
+
+
+def parse_civitai_reference(value: str) -> CivitAIReference:
+    """Parse a model/version ID, AIR, or CivitAI URL without making a request.
+
+    Bare numbers are intentionally classified later because CivitAI's model and
+    model-version IDs use separate, overlapping numeric namespaces.
+    """
+    original = str(value or "").strip()
+    if not original:
+        raise IdentifierError("A CivitAI ID, AIR, or URL is required")
+
+    # Full AIR as copied by CivitAI, its displayed `civitai:` suffix, and the
+    # compact numeric form all carry enough context to select an exact file.
+    air_match = re.fullmatch(
+        r"(?:urn:air:[^:\s]+:[^:\s]+:)?civitai:"
+        r"(?P<model>[1-9]\d*)@(?P<version>[1-9]\d*)"
+        r"(?:\+(?P<file>[1-9]\d*))?",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if not air_match:
+        air_match = re.fullmatch(
+            r"(?P<model>[1-9]\d*)@(?P<version>[1-9]\d*)"
+            r"(?:\+(?P<file>[1-9]\d*))?",
+            original,
+        )
+    if air_match:
+        return CivitAIReference(
+            original=original,
+            kind="air",
+            model_id=air_match.group("model"),
+            version_id=air_match.group("version"),
+            file_id=air_match.group("file"),
+        )
+
+    # Explicit prefixes are the escape hatch when a bare number exists in both
+    # of CivitAI's numeric namespaces.
+    explicit_match = re.fullmatch(
+        r"(?P<kind>model|version)\s*:\s*(?P<id>[1-9]\d*)",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if explicit_match:
+        kind = explicit_match.group("kind").lower()
+        resource_id = explicit_match.group("id")
+        return CivitAIReference(
+            original=original,
+            kind=kind,
+            model_id=resource_id if kind == "model" else None,
+            version_id=resource_id if kind == "version" else None,
+        )
+
+    if re.match(r"^file\s*:", original, flags=re.IGNORECASE):
+        raise IdentifierError(
+            "CivitAI cannot resolve a file ID alone. Paste the complete AIR "
+            "(civitai:model@version+file) or the model page/download URL instead."
+        )
+
+    parsed = urlparse(original)
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if parsed.scheme in ("http", "https") and host in CIVITAI_HOSTS:
+        query = parse_qs(parsed.query)
+        version_id = _positive_id(
+            _first_query_value(query, "modelVersionId"), "model version ID"
+        )
+        file_id = _positive_id(_first_query_value(query, "fileId"), "file ID")
+
+        page_match = re.match(r"^/models/([1-9]\d+)(?:/|$)", parsed.path)
+        if page_match:
+            model_id = page_match.group(1)
+            if file_id and not version_id:
+                raise IdentifierError(
+                    "A CivitAI URL with a file ID must also include modelVersionId"
+                )
+            return CivitAIReference(
+                original=original,
+                kind="version" if version_id else "model",
+                model_id=model_id,
+                version_id=version_id,
+                file_id=file_id,
+            )
+
+        version_match = re.match(
+            r"^/api/(?:v1/model-versions|download/models)/([1-9]\d+)(?:/|$)",
+            parsed.path,
+        )
+        if version_match:
+            return CivitAIReference(
+                original=original,
+                kind="version",
+                version_id=version_match.group(1),
+                file_id=file_id,
+            )
+
+        raise IdentifierError("Unsupported CivitAI URL; paste a model or download URL")
+
+    if re.fullmatch(r"[1-9]\d*", original):
+        return CivitAIReference(original=original, kind="auto", version_id=original)
+
+    raise IdentifierError(
+        "Unsupported CivitAI identifier. Paste a model ID, version ID, model URL, "
+        "download URL, or complete AIR."
+    )
 
 
 class CivitAIDownloader:
@@ -141,40 +306,184 @@ class CivitAIDownloader:
             print(f"{STATUS['warning']} Could not resolve download URL: {redact(e)}")
             return url, None
 
-    # --- Metadata (kept for optional use) --------------------------------------
+    # --- Identifier and metadata resolution -----------------------------------
 
-    def get_model_info(self, model_id: str) -> Optional[str]:
-        """Fetch model metadata from CivitAI API and return the primary model file name."""
+    def _fetch_metadata(self, path: str, resource_name: str):
+        """Fetch one public CivitAI metadata object; return None for a real 404."""
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
-        url = f"{CIVITAI_API_BASE}/v1/model-versions/{model_id}"
-
+        url = f"{CIVITAI_API_BASE}/v1/{path}"
         try:
             response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 404:
+                return None
             response.raise_for_status()
             data = response.json()
-            if "files" in data and data["files"]:
-                files = data["files"]
-                # Prefer the primary file marked by the API
-                for f in files:
-                    if f.get("primary"):
-                        return f.get("name")
-                # Fallback: prefer SafeTensor model files over training data/other
-                for f in files:
-                    if (
-                        f.get("type") == "Model"
-                        and f.get("metadata", {}).get("format") == "SafeTensor"
-                    ):
-                        return f.get("name")
-                # Last resort: first Model-type file
-                for f in files:
-                    if f.get("type") == "Model":
-                        return f.get("name")
-                return files[0].get("name")
-            print(f"{STATUS['error']} No files found in model metadata")
-            return None
+            if not isinstance(data, dict):
+                raise IdentifierError(
+                    f"CivitAI returned invalid {resource_name} metadata"
+                )
+            return data
         except requests.RequestException as e:
-            print(f"{STATUS['error']} Failed to fetch model info: {e}")
+            raise IdentifierError(
+                f"Could not check the CivitAI {resource_name}: {redact(e)}"
+            )
+        except ValueError as e:
+            raise IdentifierError(
+                f"CivitAI returned invalid {resource_name} metadata: {redact(e)}"
+            )
+
+    def _fetch_version(self, version_id: str):
+        data = self._fetch_metadata(f"model-versions/{version_id}", "model version ID")
+        if data is None or str(data.get("id")) != str(version_id):
             return None
+        return data
+
+    def _fetch_model(self, model_id: str):
+        data = self._fetch_metadata(f"models/{model_id}", "model ID")
+        if data is None or str(data.get("id")) != str(model_id):
+            return None
+        return data
+
+    @staticmethod
+    def _default_version_id(model_data) -> str:
+        versions = model_data.get("modelVersions") or []
+        if not versions or not versions[0].get("id"):
+            raise IdentifierError(
+                f"CivitAI model {model_data.get('id', '')} has no published versions"
+            )
+        return str(versions[0]["id"])
+
+    @staticmethod
+    def _select_version_file(version_data, requested_file_id: Optional[str] = None):
+        """Select an exact requested file or the version's primary model file."""
+        files = version_data.get("files") or []
+        if not files:
+            raise IdentifierError(
+                f"CivitAI version {version_data.get('id', '')} has no downloadable files"
+            )
+
+        if requested_file_id:
+            for file_data in files:
+                if str(file_data.get("id")) == str(requested_file_id):
+                    return file_data
+            raise IdentifierError(
+                f"CivitAI file {requested_file_id} does not belong to version "
+                f"{version_data.get('id', '')}"
+            )
+
+        for file_data in files:
+            if file_data.get("primary"):
+                return file_data
+        for file_data in files:
+            metadata = file_data.get("metadata") or {}
+            if (
+                file_data.get("type") == "Model"
+                and metadata.get("format") == "SafeTensor"
+            ):
+                return file_data
+        for file_data in files:
+            if file_data.get("type") == "Model":
+                return file_data
+        return files[0]
+
+    def _resolve_version_reference(
+        self, reference: CivitAIReference, version_data=None
+    ) -> ResolvedCivitAIResource:
+        version_id = reference.version_id
+        if not version_id:
+            raise IdentifierError("A CivitAI model version ID is required")
+        if version_data is None:
+            version_data = self._fetch_version(version_id)
+        if version_data is None:
+            raise IdentifierError(f"CivitAI model version {version_id} was not found")
+
+        model_id = str(version_data.get("modelId") or "")
+        if not model_id:
+            raise IdentifierError(
+                f"CivitAI version {version_id} did not identify its parent model"
+            )
+        if reference.model_id and reference.model_id != model_id:
+            raise IdentifierError(
+                f"CivitAI version {version_id} belongs to model {model_id}, not "
+                f"model {reference.model_id}"
+            )
+
+        selected = self._select_version_file(version_data, reference.file_id)
+        file_id = str(selected.get("id") or "")
+        filename = selected.get("name")
+        if not file_id or not filename:
+            raise IdentifierError(
+                f"CivitAI version {version_id} returned incomplete file metadata"
+            )
+        return ResolvedCivitAIResource(
+            original=reference.original,
+            model_id=model_id,
+            version_id=version_id,
+            file_id=file_id,
+            filename=filename,
+        )
+
+    def _resolve_model_reference(
+        self, reference: CivitAIReference, model_data=None
+    ) -> ResolvedCivitAIResource:
+        model_id = reference.model_id
+        if not model_id:
+            raise IdentifierError("A CivitAI model ID is required")
+        if model_data is None:
+            model_data = self._fetch_model(model_id)
+        if model_data is None:
+            raise IdentifierError(f"CivitAI model {model_id} was not found")
+
+        version_id = self._default_version_id(model_data)
+        print(
+            f"{STATUS['info']} Model ID {model_id} resolved to default version {version_id}"
+        )
+        version_reference = CivitAIReference(
+            original=reference.original,
+            kind="version",
+            model_id=model_id,
+            version_id=version_id,
+        )
+        return self._resolve_version_reference(version_reference)
+
+    def resolve_identifier(self, identifier: str) -> ResolvedCivitAIResource:
+        """Resolve a supported input into one verified CivitAI file.
+
+        A bare number is checked as both a model and a version. If it exists in
+        both namespaces, stopping is the only safe behavior: choosing either
+        could silently download an unrelated file.
+        """
+        reference = parse_civitai_reference(identifier)
+        if reference.kind == "model":
+            return self._resolve_model_reference(reference)
+        if reference.kind in ("version", "air"):
+            return self._resolve_version_reference(reference)
+
+        bare_id = reference.version_id
+        version_data = self._fetch_version(bare_id)
+        model_data = self._fetch_model(bare_id)
+        if version_data is not None and model_data is not None:
+            version_parent = (version_data.get("model") or {}).get("name") or "unknown"
+            model_name = model_data.get("name") or "unknown"
+            raise IdentifierError(
+                f"{bare_id} is both a model ID and a version ID. "
+                f"Use model:{bare_id} for model '{model_name}', or "
+                f"version:{bare_id} for the version belonging to '{version_parent}'."
+            )
+        if version_data is not None:
+            return self._resolve_version_reference(reference, version_data)
+        if model_data is not None:
+            model_reference = CivitAIReference(
+                original=reference.original,
+                kind="model",
+                model_id=bare_id,
+            )
+            return self._resolve_model_reference(model_reference, model_data)
+        raise IdentifierError(
+            f"CivitAI could not find {bare_id} as a model or version ID. "
+            "If this is a file ID alone, CivitAI's public API cannot map it back "
+            "to its version; paste the complete AIR or model/download URL."
+        )
 
     # --- File utilities ---------------------------------------------------------
 
@@ -343,7 +652,9 @@ class CivitAIDownloader:
                 # A partial file WITH its .aria2 control file is resumable:
                 # aria2 verified the completed byte ranges, so --continue finishes
                 # it safely. Deleting here would defeat the whole point of resume.
-                print(f"{STATUS['download']} Resuming interrupted download: {file_path.name}")
+                print(
+                    f"{STATUS['download']} Resuming interrupted download: {file_path.name}"
+                )
                 resuming = True
             else:
                 # Orphaned partial with no resume state -> can't trust it, start clean.
@@ -354,7 +665,9 @@ class CivitAIDownloader:
         elif not force and aria2_control.exists():
             # Control file with no data file: aria2c aborts on --continue against
             # this, and it never self-heals. Drop the stale control and start fresh.
-            print(f"{STATUS['cleanup']} Removing stale aria2 control file (no data file)")
+            print(
+                f"{STATUS['cleanup']} Removing stale aria2 control file (no data file)"
+            )
             aria2_control.unlink(missing_ok=True)
 
         # Only use unique filename generation if we're actually going to download,
@@ -431,66 +744,38 @@ class CivitAIDownloader:
             return False, None
 
     def download_with_aria2(
-        self, model_id: str, prefer_filename: Optional[str], force: bool = False
+        self, identifier: str, prefer_filename: Optional[str], force: bool = False
     ) -> Tuple[bool, Optional[Path]]:
         """
-        Try the version's primary file first, then Diffusers ZIP as fallback.
+        Resolve a CivitAI identifier and download its exact selected file.
         prefer_filename: user-supplied target name (may be None).
         Returns (ok, final_path or None).
         """
-        # --- Attempt 1: primary file (SafeTensor, GGUF, Pickle, ...) -----------
-        # Omitting `format=` lets Civitai serve whatever the version's primary
-        # file is — hardcoding format=SafeTensor 404s on GGUF/Pickle versions.
-        params = {"type": "Model"}
-        if self.token:
-            params["token"] = self.token
-        primary_url = (
-            f"{CIVITAI_API_BASE}/download/models/{model_id}?{urlencode(params)}"
-        )
-
-        # Resolve filename: user-supplied > metadata API > redirect URL > fallback
-        target_name = prefer_filename
-        if not target_name:
-            target_name = self.get_model_info(model_id)
-        # NOTE: no preemptive cleanup here — _download_with_url decides per-file
-        # whether to skip (valid), resume (partial + .aria2), or re-download.
-
-        ok, path = self._download_with_url(primary_url, target_name, force)
-        if ok and path:
-            ok2, msg, final_path = self.process_downloaded_file(path)
-            if ok2:
-                print(f"{STATUS['success']} {msg}")
-                return True, final_path or path
-            else:
-                print(f"{STATUS['error']} Processing failed: {msg}")
-
+        resource = self.resolve_identifier(identifier)
         print(
-            f"{STATUS['warning']} Primary download did not succeed; trying Diffusers ZIP"
+            f"{STATUS['info']} Resolved model {resource.model_id}, "
+            f"version {resource.version_id}, file {resource.file_id}"
         )
 
-        # --- Attempt 2: Diffusers format (ZIP) ---------------------------------
-        params = {"type": "Model", "format": "Diffusers"}
+        # CivitAI's fileId selector is the only deterministic selection when a
+        # version has multiple Model files with the same metadata or filename.
+        params = {"fileId": resource.file_id}
         if self.token:
             params["token"] = self.token
-        zip_url = f"{CIVITAI_API_BASE}/download/models/{model_id}?{urlencode(params)}"
-
-        # Use prefer_filename with _diffusers.zip suffix if available
-        header_name = None
-        if prefer_filename:
-            header_name = f"{Path(prefer_filename).stem}_diffusers.zip"
-
-        # no preemptive cleanup — _download_with_url handles skip/resume/redownload
-
-        ok, path = self._download_with_url(zip_url, header_name, force)
+        download_url = (
+            f"{CIVITAI_API_BASE}/download/models/{resource.version_id}"
+            f"?{urlencode(params)}"
+        )
+        target_name = prefer_filename or resource.filename
+        ok, path = self._download_with_url(download_url, target_name, force)
         if ok and path:
             ok2, msg, final_path = self.process_downloaded_file(path)
             if ok2:
                 print(f"{STATUS['success']} {msg}")
                 return True, final_path or path
-            else:
-                print(f"{STATUS['error']} ZIP processing failed: {msg}")
+            print(f"{STATUS['error']} Processing failed: {msg}")
 
-        print(f"{STATUS['error']} All download attempts failed")
+        print(f"{STATUS['error']} Download failed")
         return False, None
 
 
@@ -516,15 +801,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s -m 123456                    # Download model to current directory
-  %(prog)s -m 123456 -o ./models        # Download to specific directory
-  %(prog)s -m 123456 --force            # Force re-download
-  %(prog)s -m 123456 --filename custom.safetensors  # Use custom filename
+  %(prog)s -m 3268303                   # Auto-detect a version or model ID
+  %(prog)s -m model:2834417             # Explicit model ID; use its default version
+  %(prog)s -m version:3268303           # Explicit model-version ID
+  %(prog)s -m 'civitai:2834417@3268303+3152083'  # Exact AIR file
+  %(prog)s -m 'https://civitai.com/models/2834417?modelVersionId=3268303'
         """,
     )
 
     parser.add_argument(
-        "-m", "--model-id", required=True, help="CivitAI model version ID"
+        "-m",
+        "--identifier",
+        "--model-id",
+        dest="identifier",
+        required=True,
+        metavar="IDENTIFIER",
+        help="CivitAI model/version ID, model URL, download URL, or AIR",
     )
     parser.add_argument(
         "-o",
@@ -556,7 +848,7 @@ Examples:
             print(f"{STATUS['info']} Using custom filename: {prefer_filename}")
 
         ok, final_path = downloader.download_with_aria2(
-            args.model_id, prefer_filename, force=args.force
+            args.identifier, prefer_filename, force=args.force
         )
         if ok:
             if final_path and final_path.exists():
@@ -574,6 +866,9 @@ Examples:
         else:
             sys.exit(1)
 
+    except IdentifierError as e:
+        print(f"{STATUS['error']} {redact(e)}")
+        sys.exit(2)
     except KeyboardInterrupt:
         print(f"\n{STATUS['warning']} Download interrupted by user")
         sys.exit(130)
