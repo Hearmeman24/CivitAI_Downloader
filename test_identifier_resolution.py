@@ -97,6 +97,8 @@ class ParseIdentifierTests(unittest.TestCase):
         self.assert_reference("model:2834417", MODEL_ID, None, None, "model")
         self.assert_reference("version:3268303", None, VERSION_ID, None, "version")
         self.assert_reference("3268303", None, VERSION_ID, None, "auto")
+        self.assert_reference("3268303+3152083", None, VERSION_ID, FILE_ID, "version")
+        self.assert_reference("civitai:3268303", None, VERSION_ID, None, "auto")
 
     def test_bad_or_context_free_file_input_is_rejected_locally(self):
         for raw in ("", "not-an-id", "file:3152083", "2834417@3268303+nope"):
@@ -201,8 +203,23 @@ class ResolveIdentifierTests(unittest.TestCase):
         dl._fetch_model = lambda value: None
         dl._fetch_version = lambda value: None
 
-        with self.assertRaisesRegex(dwa.IdentifierError, "file ID alone"):
+        with self.assertRaisesRegex(dwa.IdentifierError, "could not find"):
             dl.resolve_identifier(FILE_ID)
+        with self.assertRaisesRegex(dwa.IdentifierError, "fileId|file ID"):
+            dl.resolve_identifier(FILE_ID)
+
+    def test_version_plus_file_shorthand_selects_exact_file(self):
+        dl = self.downloader()
+        dl._fetch_model = lambda value: None
+        dl._fetch_version = lambda value: (
+            version_data() if value == VERSION_ID else None
+        )
+
+        resolved = dl.resolve_identifier(f"{VERSION_ID}+{FILE_ID}")
+
+        self.assertEqual(resolved.version_id, VERSION_ID)
+        self.assertEqual(resolved.file_id, FILE_ID)
+        self.assertEqual(resolved.filename, FILENAME)
 
     def test_exact_file_download_uses_civitai_file_id_selector(self):
         dl = self.downloader()

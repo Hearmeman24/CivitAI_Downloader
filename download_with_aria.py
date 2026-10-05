@@ -245,7 +245,35 @@ def parse_civitai_reference(value: str) -> CivitAIReference:
 
     if re.match(r"^file\s*:", original, flags=re.IGNORECASE):
         raise IdentifierError(
-            "a file ID alone cannot be resolved; paste the complete AIR or CivitAI URL"
+            "a bare file ID cannot be resolved; CivitAI has no file-by-id lookup. "
+            "Use the modelVersionId from the model page URL (or /api/download/models/"
+            "<versionId>), or paste the complete AIR / CivitAI URL"
+        )
+
+    # Compact version+file form from download URLs: <versionId>+<fileId>
+    version_file_match = re.fullmatch(
+        r"(?P<version>[1-9]\d*)\+(?P<file>[1-9]\d*)",
+        original,
+    )
+    if version_file_match:
+        return CivitAIReference(
+            original=original,
+            kind="version",
+            version_id=version_file_match.group("version"),
+            file_id=version_file_match.group("file"),
+        )
+
+    # Partial AIR that only carries one numeric id: treat like a bare number.
+    partial_air_match = re.fullmatch(
+        r"(?:urn:air:[^:\s]+:[^:\s]+:)?civitai:(?P<id>[1-9]\d*)",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if partial_air_match:
+        return CivitAIReference(
+            original=original,
+            kind="auto",
+            version_id=partial_air_match.group("id"),
         )
 
     parsed = urlparse(original)
@@ -537,8 +565,11 @@ class CivitAIDownloader:
                 model_data,
             )
         raise IdentifierError(
-            f"CivitAI could not find {bare_id} as a model or version ID; if it is "
-            "a file ID alone, paste the complete AIR or CivitAI URL"
+            f"CivitAI could not find {bare_id} as a model or version ID. "
+            "Enter the modelVersionId from the model page URL "
+            "(.../?modelVersionId=...), not the model id after /models/ and not a "
+            "fileId. Bare file IDs cannot be looked up; paste the complete AIR "
+            "(civitai:<modelId>@<versionId>+<fileId>) or CivitAI URL instead."
         )
 
     @staticmethod
@@ -1079,6 +1110,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   %(prog)s -m 3268303
+  %(prog)s -m 3268303+3152083
   %(prog)s -m model:2834417
   %(prog)s -m version:3268303
   %(prog)s -m 'civitai:2834417@3268303+3152083'
@@ -1093,7 +1125,7 @@ Examples:
         dest="identifier",
         required=True,
         metavar="IDENTIFIER",
-        help="CivitAI model/version ID, model URL, download URL, or AIR",
+        help="CivitAI model/version ID, version+file, model URL, download URL, or AIR",
     )
     parser.add_argument("-o", "--output", default=".", help="output directory")
     parser.add_argument(

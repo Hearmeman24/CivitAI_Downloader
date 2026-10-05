@@ -92,8 +92,12 @@ All identifier forms use the same argument:
 
 A bare number is checked as both a model and a model-version ID. If it exists in
 both namespaces, the downloader stops and asks for `model:<id>` or `version:<id>`
-instead of guessing. CivitAI does not expose a public reverse lookup from a bare
-file ID to its version, so a file ID by itself requires the complete AIR or URL.
+instead of guessing. Prefer the **model version ID** (`modelVersionId=` on the
+model page, or the number in `/api/download/models/<versionId>`).
+
+You can also pass `versionId+fileId` when a version ships multiple files.
+CivitAI does not expose a public reverse lookup from a bare file ID to its
+version, so a `fileId` by itself still requires the complete AIR or URL.
 
 Other options:
 
